@@ -1,6 +1,6 @@
 classdef ImageRectifier < matlab.apps.AppBase 
     % -------------------------------------------------------------------------
-    % UIコンポーネント
+    % UIコンポーネントとプロパティ
     % -------------------------------------------------------------------------
     properties (Access = public)
         UIFigure          matlab.ui.Figure
@@ -10,6 +10,7 @@ classdef ImageRectifier < matlab.apps.AppBase
         RefUIAxes         matlab.ui.control.UIAxes
         
         ImgDropDown       matlab.ui.control.DropDown 
+        ReloadImgBtn      matlab.ui.control.Button % 更新ボタン
         
         LoadBtn           matlab.ui.control.Button
         ClearStackBtn     matlab.ui.control.Button
@@ -23,41 +24,65 @@ classdef ImageRectifier < matlab.apps.AppBase
         TopEdit           matlab.ui.control.NumericEditField
         BottomEdit        matlab.ui.control.NumericEditField
         DpcmEdit          matlab.ui.control.NumericEditField
-        LabelPosDropDown  matlab.ui.control.DropDown % ★追加: 文字位置選択
+        LabelPosDropDown  matlab.ui.control.DropDown
+        
         UITable           matlab.ui.control.Table
         ClearBtn          matlab.ui.control.Button
+        
         GraphCheckbox     matlab.ui.control.CheckBox
         PreviewCheckbox   matlab.ui.control.CheckBox
         ProcessBtn        matlab.ui.control.Button
         SaveBtn           matlab.ui.control.Button
     end
-    % -------------------------------------------------------------------------
-    % 内部データ
-    % -------------------------------------------------------------------------
     properties (Access = private)
-        OrigImgList = {}      
-        TableDataList = {}    
-        CurrentImgIdx = 1     
+        OrigImgList = {}
+        ImgPathList = {} 
+        TableDataList = {}
+        CurrentImgIdx = 1
+        OrigImg = []
+        RefImg = []
+        ProcessedImg = []
         
-        OrigImg         
-        RefImg          
-        ProcessedImg
+        ImgObj
+        RefImgObj
         TargetLine
-        MarkerPlots
-        GuidelinePlots     % 1cmごとの補助線のプロットハンドルを保持
-        ImgObj          
-        RefImgObj       
+        MarkerPlots = []
+        GuidelinePlots = []
+        
+        LastMouseY = -1
+        FirstFileName = ''
+        GraphFigure
         LastPath = ''
-        
-        FirstFileName = '' 
-        GraphFigure        
-        
-        LastMouseY = -1;
     end
     % -------------------------------------------------------------------------
     % コールバック・ロジック
     % -------------------------------------------------------------------------
     methods (Access = private)
+        
+        function FigureSizeChanged(app, ~, ~)
+            if ~isvalid(app.UIFigure) || ~isvalid(app.LeftPanel) || ~isvalid(app.ScrollPanel)
+                return;
+            end
+            
+            figPos = app.UIFigure.Position;
+            figW = figPos(3);
+            figH = figPos(4);
+            
+            leftW = 280;
+            leftH = 860;
+            margin = 10;
+            
+            leftY = figH - leftH - margin;
+            app.LeftPanel.Position = [margin, leftY, leftW, leftH];
+            
+            scrollX = margin * 2 + leftW;
+            scrollW = max(10, figW - scrollX - margin);
+            scrollH = max(10, figH - margin * 2);
+            app.ScrollPanel.Position = [scrollX, margin, scrollW, scrollH];
+            
+            app.updateAxesLayout();
+        end
+
         function updateMainImageDisplay(app)
             if isempty(app.OrigImg) || isempty(app.ImgObj) || ~isvalid(app.ImgObj)
                 return;
@@ -71,6 +96,11 @@ classdef ImageRectifier < matlab.apps.AppBase
             img_adj = max(0, min(255, img_adj));
             
             app.ImgObj.CData = uint8(img_adj);
+            
+            tempCData = app.ImgObj.CData;
+            app.ImgObj.CData = [];
+            drawnow limitrate;
+            app.ImgObj.CData = tempCData;
         end
         
         function updateRefImageDisplay(app)
@@ -86,9 +116,18 @@ classdef ImageRectifier < matlab.apps.AppBase
             img_adj = max(0, min(255, img_adj));
             
             app.RefImgObj.CData = uint8(img_adj);
+            
+            tempCDataRef = app.RefImgObj.CData;
+            app.RefImgObj.CData = [];
+            drawnow limitrate;
+            app.RefImgObj.CData = tempCDataRef;
         end
         
         function updateAxesLayout(app)
+            if ~isvalid(app.ScrollPanel) || ~isvalid(app.UIAxes)
+                return;
+            end
+            
             panelW = app.ScrollPanel.Position(3);
             panelH = app.ScrollPanel.Position(4);
             
@@ -119,10 +158,37 @@ classdef ImageRectifier < matlab.apps.AppBase
             end
             
             maxH = max([H_main, H_ref]);
-            topY = max(panelH, maxH + margin); 
+            topY = max([panelH, maxH + margin]); 
             
             app.UIAxes.Position = [margin, topY - H_main, axesW_main, H_main];
             app.RefUIAxes.Position = [margin * 2 + halfW, topY - H_ref, axesW_ref, H_ref];
+            
+            if ~isempty(app.OrigImg) && isvalid(app.UIAxes)
+                [H, W, ~] = size(app.OrigImg);
+                app.UIAxes.XLim = [0.5, W + 0.5];
+                app.UIAxes.YLim = [0.5, H + 0.5];
+            end
+            if ~isempty(app.RefImg) && isvalid(app.RefUIAxes)
+                [H_r, W_r, ~] = size(app.RefImg);
+                app.RefUIAxes.XLim = [0.5, W_r + 0.5];
+                app.RefUIAxes.YLim = [0.5, H_r + 0.5];
+            end
+            
+            if ~isempty(app.ImgObj) && isvalid(app.ImgObj)
+                tempCData = app.ImgObj.CData;
+                app.ImgObj.CData = [];
+                drawnow limitrate;
+                app.ImgObj.CData = tempCData;
+            end
+            
+            if ~isempty(app.RefImgObj) && isvalid(app.RefImgObj)
+                tempCDataRef = app.RefImgObj.CData;
+                app.RefImgObj.CData = [];
+                drawnow limitrate;
+                app.RefImgObj.CData = tempCDataRef;
+            end
+            
+            drawnow limitrate;
         end
         
         function switchImage(app, idx)
@@ -138,12 +204,14 @@ classdef ImageRectifier < matlab.apps.AppBase
             
             if isempty(app.ImgObj) || ~isvalid(app.ImgObj)
                 app.ImgObj = image(app.UIAxes, 'CData', app.OrigImg, 'XData', [1 W], 'YData', [1 H]);
+                app.ImgObj.Interpolation = 'bilinear';
                 app.ImgObj.ButtonDownFcn = @(src, event) app.ImageClicked(src, event);
                 app.ImgObj.PickableParts = 'visible';
             else
                 app.ImgObj.CData = app.OrigImg;
                 app.ImgObj.XData = [1 W];
                 app.ImgObj.YData = [1 H];
+                app.ImgObj.Interpolation = 'bilinear';
             end
             
             app.UIAxes.XLim = [0.5, W + 0.5];
@@ -155,7 +223,6 @@ classdef ImageRectifier < matlab.apps.AppBase
             if ~isempty(app.TargetLine) && isvalid(app.TargetLine)
                 delete(app.TargetLine);
             end
-            % ★変更: LineWidthを1.5から0.5にして線を細くした
             app.TargetLine = plot(app.UIAxes, [1, W], [1, 1], 'g-', 'LineWidth', 0.5, 'Visible', 'off');
             app.TargetLine.PickableParts = 'none';
             app.TargetLine.HitTest = 'off';
@@ -178,6 +245,38 @@ classdef ImageRectifier < matlab.apps.AppBase
                 app.switchImage(idx);
             end
         end
+
+        function ReloadImgBtnPushed(app, ~, ~)
+            if isempty(app.OrigImgList) || app.CurrentImgIdx > length(app.ImgPathList)
+                return;
+            end
+            
+            currentPath = app.ImgPathList{app.CurrentImgIdx};
+            
+            if isfile(currentPath)
+                try
+                    reloadedImg = imread(currentPath);
+                    app.OrigImgList{app.CurrentImgIdx} = reloadedImg;
+                    app.OrigImg = reloadedImg;
+                    [H, W, ~] = size(app.OrigImg);
+                    
+                    if ~isempty(app.ImgObj) && isvalid(app.ImgObj)
+                        app.ImgObj.CData = app.OrigImg;
+                        app.ImgObj.XData = [1 W];
+                        app.ImgObj.YData = [1 H];
+                    end
+                    
+                    app.updateAxesLayout();
+                    app.updateMainImageDisplay();
+                    app.updateGuidelines();
+                    drawnow;
+                catch ME
+                    uialert(app.UIFigure, ['画像の再読み込みに失敗しました: ', ME.message], 'エラー');
+                end
+            else
+                uialert(app.UIFigure, '元の画像ファイルが見つかりません。移動または削除された可能性があります。', 'エラー');
+            end
+        end
         
         function LoadBtnPushed(app, ~, ~)
             startPath = app.LastPath;
@@ -187,10 +286,12 @@ classdef ImageRectifier < matlab.apps.AppBase
             if isequal(file, 0); return; end
             
             app.LastPath = path;
-            newImg = imread(fullfile(path, file));
+            fullFilePath = fullfile(path, file);
+            newImg = imread(fullFilePath);
             
             numImgs = length(app.OrigImgList) + 1;
             app.OrigImgList{numImgs} = newImg;
+            app.ImgPathList{numImgs} = fullFilePath; 
             app.TableDataList{numImgs} = zeros(0, 2);
             
             if numImgs == 1
@@ -217,33 +318,62 @@ classdef ImageRectifier < matlab.apps.AppBase
         
         function ClearStackBtnPushed(app, ~, ~)
             app.OrigImgList = {};
+            app.ImgPathList = {};
             app.TableDataList = {};
             app.CurrentImgIdx = 1;
             app.OrigImg = [];
+            app.RefImg = [];
             app.FirstFileName = ''; 
-            app.GraphFigure = [];   
             app.LastMouseY = -1;
+            app.ProcessedImg = [];
+            
+            if ~isempty(app.GraphFigure) && isvalid(app.GraphFigure)
+                close(app.GraphFigure);
+            end
+            app.GraphFigure = [];   
             
             app.ImgDropDown.Items = {'No Image'};
             app.ImgDropDown.Visible = 'off';
             app.UITable.Data = zeros(0, 2);
             
+            app.MainBrightSlider.Value = 0;
+            app.MainContrastSlider.Value = 1.0;
+            app.RefBrightSlider.Value = 0;
+            app.RefContrastSlider.Value = 1.0;
+            app.TopEdit.Value = 0;
+            app.BottomEdit.Value = 100;
+            app.DpcmEdit.Value = 150;
+            app.LabelPosDropDown.Value = '中央';
+            
             if ~isempty(app.ImgObj) && isvalid(app.ImgObj)
                 delete(app.ImgObj);
             end
+            app.ImgObj = [];
+            
+            if ~isempty(app.RefImgObj) && isvalid(app.RefImgObj)
+                delete(app.RefImgObj);
+            end
+            app.RefImgObj = [];
+            
             if ~isempty(app.TargetLine) && isvalid(app.TargetLine)
                 delete(app.TargetLine);
             end
+            app.TargetLine = [];
+            
             if ~isempty(app.MarkerPlots)
                 delete(app.MarkerPlots(isvalid(app.MarkerPlots)));
-                app.MarkerPlots = [];
             end
+            app.MarkerPlots = [];
+            
             if ~isempty(app.GuidelinePlots)
                 delete(app.GuidelinePlots(isvalid(app.GuidelinePlots)));
-                app.GuidelinePlots = [];
             end
+            app.GuidelinePlots = [];
             
-            app.ProcessedImg = [];
+            cla(app.UIAxes);
+            cla(app.RefUIAxes);
+            app.updateAxesLayout();
+            
             drawnow;
         end
         
@@ -261,6 +391,7 @@ classdef ImageRectifier < matlab.apps.AppBase
             app.updateAxesLayout();
             
             app.RefImgObj = image(app.RefUIAxes, 'CData', app.RefImg, 'XData', [1 W], 'YData', [1 H]);
+            app.RefImgObj.Interpolation = 'bilinear';
             app.RefImgObj.PickableParts = 'none';
             app.RefUIAxes.XLim = [0.5, W + 0.5];
             app.RefUIAxes.YLim = [0.5, H + 0.5];
@@ -359,7 +490,7 @@ classdef ImageRectifier < matlab.apps.AppBase
             app.MarkerPlots = tempPlots(isvalid(tempPlots));
             app.updateGuidelines();
         end
-
+        
         function updateGuidelines(app)
             if ~isempty(app.GuidelinePlots)
                 delete(app.GuidelinePlots(isvalid(app.GuidelinePlots)));
@@ -380,6 +511,10 @@ classdef ImageRectifier < matlab.apps.AppBase
                 pts_cm = data(:, 2);
                 [pts_cm, sortIdx] = sort(pts_cm);
                 pts_px = pts_px(sortIdx);
+                
+                % ★修正: 重複するcm値を取り除く（安定ソートにより最初のpx値を採用）
+                [pts_cm, uniqueIdx] = unique(pts_cm, 'stable');
+                pts_px = pts_px(uniqueIdx);
             end
             
             top_cm = app.TopEdit.Value;
@@ -405,7 +540,6 @@ classdef ImageRectifier < matlab.apps.AppBase
             tempPlots = gobjects(1, numTargets * 2);
             plotIdx = 1;
             
-            % ★追加: ユーザーが選択した文字位置の取得
             labelPos = app.LabelPosDropDown.Value;
             
             hold(app.UIAxes, 'on');
@@ -414,11 +548,11 @@ classdef ImageRectifier < matlab.apps.AppBase
                 
                 if N >= 2
                     if c >= pts_cm(1) && c <= pts_cm(end)
-                        lineColor = [0 0.8 0.8]; % Cyan (内挿)
+                        lineColor = [0 0.8 0.8]; % Cyan
                         lineStyle = '--';
                         labelSuffix = '(In)';
                     else
-                        lineColor = [0.9 0 0.9]; % Magenta (外挿)
+                        lineColor = [0.9 0 0.9]; % Magenta
                         lineStyle = ':';
                         labelSuffix = '(Ex)';
                     end
@@ -460,14 +594,13 @@ classdef ImageRectifier < matlab.apps.AppBase
                     
                     labelStr = sprintf('%d cm %s', c, labelSuffix);
                     
-                    % ★追加: 位置に応じたX座標とAlignmentの設定
                     if strcmp(labelPos, '左')
                         textX = 10;
                         align = 'left';
                     elseif strcmp(labelPos, '中央')
                         textX = W_orig / 2;
                         align = 'center';
-                    else % 右
+                    else
                         textX = W_orig - 10;
                         align = 'right';
                     end
@@ -515,12 +648,40 @@ classdef ImageRectifier < matlab.apps.AppBase
             cm_out = top_cm + ((0 : H_out - 1) / dpcm);
             
             numImgs = length(app.OrigImgList);
-            max_W = 0;
+            
+            W_out_max = 0;
+            S_nom_list = zeros(numImgs, 1);
+            
             for i = 1:numImgs
-                max_W = max(max_W, size(app.OrigImgList{i}, 2));
+                [H_orig, W_orig, ~] = size(app.OrigImgList{i});
+                data = app.TableDataList{i};
+                
+                if isempty(data)
+                    pts_px = []; pts_cm = [];
+                else
+                    pts_px = data(:, 1);
+                    pts_cm = data(:, 2);
+                    [pts_cm, sortIdx] = sort(pts_cm);
+                    pts_px = pts_px(sortIdx);
+                    
+                    % ★修正: 重複を排除
+                    [pts_cm, uniqueIdx] = unique(pts_cm, 'stable');
+                    pts_px = pts_px(uniqueIdx);
+                end
+                
+                N = length(pts_cm);
+                if N >= 2
+                    S_nom = (pts_px(end) - pts_px(1)) / (pts_cm(end) - pts_cm(1));
+                else
+                    S_nom = H_orig / (total_cm / numImgs); 
+                end
+                S_nom_list(i) = S_nom;
+                
+                w_out_i = round(W_orig * (dpcm / S_nom));
+                W_out_max = max(W_out_max, w_out_i);
             end
             
-            outImg = zeros(H_out, max_W, size(app.OrigImgList{1}, 3), 'uint8');
+            outImg = zeros(H_out, W_out_max, size(app.OrigImgList{1}, 3), 'uint8');
             
             figure_plotted = false;
             if app.GraphCheckbox.Value
@@ -550,15 +711,14 @@ classdef ImageRectifier < matlab.apps.AppBase
                     pts_cm = data(:, 2);
                     [pts_cm, sortIdx] = sort(pts_cm);
                     pts_px = pts_px(sortIdx);
+                    
+                    % ★修正: 重複を排除
+                    [pts_cm, uniqueIdx] = unique(pts_cm, 'stable');
+                    pts_px = pts_px(uniqueIdx);
                 end
                 
                 N = length(pts_cm);
-                
-                if N >= 2
-                    S_nom = (pts_px(end) - pts_px(1)) / (pts_cm(end) - pts_cm(1));
-                else
-                    S_nom = H_orig / (total_cm / numImgs); 
-                end
+                S_nom = S_nom_list(i);
                 
                 if N == 0
                     offset_cm = top_cm + (i-1)*(total_cm / numImgs);
@@ -594,18 +754,22 @@ classdef ImageRectifier < matlab.apps.AppBase
                     end
                 end
                 
-                [X_out, Y_out] = meshgrid(1:W_orig, y_in);
-                outImg_i = zeros(H_out, W_orig, C, 'uint8');
+                W_out_i = round(W_orig * (dpcm / S_nom));
+                x_in = ((1:W_out_i) - 1) * (S_nom / dpcm) + 1;
+                
+                [X_out_grid, Y_out_grid] = meshgrid(x_in, y_in);
+                
+                outImg_i = zeros(H_out, W_out_i, C, 'uint8');
                 for c = 1:C
-                    outImg_i(:,:,c) = uint8(interp2(double(img(:,:,c)), X_out, Y_out, 'linear', 0));
+                    outImg_i(:,:,c) = uint8(interp2(double(img(:,:,c)), X_out_grid, Y_out_grid, 'linear', 0));
                 end
                 
                 mask = any(outImg_i > 0, 3);
                 for c = 1:C
-                    ch_out = outImg(:, 1:W_orig, c);
+                    ch_out = outImg(:, 1:W_out_i, c);
                     ch_i = outImg_i(:,:,c);
                     ch_out(mask) = ch_i(mask);
-                    outImg(:, 1:W_orig, c) = ch_out;
+                    outImg(:, 1:W_out_i, c) = ch_out;
                 end
                 
                 y_offset = y_offset + H_orig;
@@ -637,9 +801,14 @@ classdef ImageRectifier < matlab.apps.AppBase
                 [~, bName, ~] = fileparts(app.FirstFileName);
                 baseName = bName;
             end
-            defaultFileName = sprintf('%s_processed.png', baseName);
             
-            [file, path] = uiputfile({'*.png;*.jpg;*.tif', '画像ファイル'}, 'ベース名をつけて保存', fullfile(startPath, defaultFileName));
+            defaultFileName = sprintf('%s_processed.jpg', baseName);
+            [file, path] = uiputfile({ ...
+                '*.jpg;*.jpeg', 'JPEG 画像 (*.jpg, *.jpeg)'; ...
+                '*.png', 'PNG 画像 (*.png)'; ...
+                '*.tif;*.tiff', 'TIFF 画像 (*.tif, *.tiff)'}, ...
+                'ベース名をつけて保存', fullfile(startPath, defaultFileName));
+                
             if isequal(file, 0); return; end
             
             app.LastPath = path;
@@ -669,20 +838,25 @@ classdef ImageRectifier < matlab.apps.AppBase
             uialert(app.UIFigure, '画像、補正リストCSV、プロットの保存が完了しました。', '保存成功');
         end
     end
+    
     % -------------------------------------------------------------------------
     % アプリのレイアウト構築
     % -------------------------------------------------------------------------
     methods (Access = private)
         function createComponents(app)
             app.UIFigure = uifigure('Position', [100, 100, 1350, 880], 'Name', 'Vertical Image Warper (Stack & Dual View)');
+            app.UIFigure.AutoResizeChildren = 'off';
             app.UIFigure.WindowButtonMotionFcn = @(src, event) app.MouseMoved(src, event);
+            app.UIFigure.SizeChangedFcn = @(src, event) app.FigureSizeChanged(src, event); 
             
-            app.LeftPanel = uipanel(app.UIFigure, 'Position', [10, 10, 280, 860]);
+            app.LeftPanel = uipanel(app.UIFigure, 'Position', [10, 10, 280, 860], 'AutoResizeChildren', 'off');
             
-            %% メイン画像コントロール
-            app.ImgDropDown = uidropdown(app.LeftPanel, 'Position', [10, 825, 250, 22], ...
+            app.ImgDropDown = uidropdown(app.LeftPanel, 'Position', [10, 825, 215, 22], ...
                 'Items', {'No Image'}, 'Visible', 'off');
             app.ImgDropDown.ValueChangedFcn = @(src, event) app.ImgDropDownChanged(event);
+            
+            app.ReloadImgBtn = uibutton(app.LeftPanel, 'push', 'Position', [230, 825, 40, 22], ...
+                'Text', '更新', 'ButtonPushedFcn', @app.ReloadImgBtnPushed);
             
             app.LoadBtn = uibutton(app.LeftPanel, 'push', 'Position', [10, 790, 135, 30], ...
                 'Text', '1. 画像を追加読込', 'ButtonPushedFcn', @app.LoadBtnPushed);
@@ -690,95 +864,88 @@ classdef ImageRectifier < matlab.apps.AppBase
                 'Text', 'スタックをクリア', 'ButtonPushedFcn', @app.ClearStackBtnPushed);
                 
             uilabel(app.LeftPanel, 'Position', [10, 755, 60, 22], 'Text', '明度');
-            app.MainBrightSlider = uislider(app.LeftPanel, 'Position', [70, 766, 180, 3], ...
-                'Limits', [-128, 128], 'Value', 0, 'ValueChangedFcn', @(~,~) app.updateMainImageDisplay());
+            app.MainBrightSlider = uislider(app.LeftPanel, 'Position', [70, 765, 190, 3], 'Limits', [-128 128], 'Value', 0);
+            app.MainBrightSlider.ValueChangedFcn = @(src, event) app.updateMainImageDisplay();
+            
+            uilabel(app.LeftPanel, 'Position', [10, 720, 80, 22], 'Text', 'コントラスト');
+            app.MainContrastSlider = uislider(app.LeftPanel, 'Position', [90, 730, 170, 3], 'Limits', [0 3], 'Value', 1);
+            app.MainContrastSlider.ValueChangedFcn = @(src, event) app.updateMainImageDisplay();
+            
+            app.LoadRefBtn = uibutton(app.LeftPanel, 'push', 'Position', [10, 670, 250, 30], ...
+                'Text', '2. 参照画像を開く', 'ButtonPushedFcn', @app.LoadRefBtnPushed);
                 
-            uilabel(app.LeftPanel, 'Position', [10, 725, 60, 22], 'Text', 'ｺﾝﾄﾗｽﾄ');
-            app.MainContrastSlider = uislider(app.LeftPanel, 'Position', [70, 736, 180, 3], ...
-                'Limits', [0.1, 3.0], 'Value', 1.0, 'ValueChangedFcn', @(~,~) app.updateMainImageDisplay());
+            uilabel(app.LeftPanel, 'Position', [10, 635, 60, 22], 'Text', '明度');
+            app.RefBrightSlider = uislider(app.LeftPanel, 'Position', [70, 645, 190, 3], 'Limits', [-128 128], 'Value', 0);
+            app.RefBrightSlider.ValueChangedFcn = @(src, event) app.updateRefImageDisplay();
             
-            %% 参考画像コントロール
-            app.LoadRefBtn = uibutton(app.LeftPanel, 'push', 'Position', [10, 680, 250, 30], ...
-                'Text', '2. 参考画像を読み込む', 'ButtonPushedFcn', @app.LoadRefBtnPushed);
-                
-            uilabel(app.LeftPanel, 'Position', [10, 645, 60, 22], 'Text', '明度');
-            app.RefBrightSlider = uislider(app.LeftPanel, 'Position', [70, 656, 180, 3], ...
-                'Limits', [-128, 128], 'Value', 0, 'ValueChangedFcn', @(~,~) app.updateRefImageDisplay());
-                
-            uilabel(app.LeftPanel, 'Position', [10, 615, 60, 22], 'Text', 'ｺﾝﾄﾗｽﾄ');
-            app.RefContrastSlider = uislider(app.LeftPanel, 'Position', [70, 626, 180, 3], ...
-                'Limits', [0.1, 3.0], 'Value', 1.0, 'ValueChangedFcn', @(~,~) app.updateRefImageDisplay());
+            uilabel(app.LeftPanel, 'Position', [10, 600, 80, 22], 'Text', 'コントラスト');
+            app.RefContrastSlider = uislider(app.LeftPanel, 'Position', [90, 610, 170, 3], 'Limits', [0 3], 'Value', 1);
+            app.RefContrastSlider.ValueChangedFcn = @(src, event) app.updateRefImageDisplay();
             
-            %% 補正パラメータ設定
-            % Y座標のレイアウトを調整してドロップダウンを追加
-            uilabel(app.LeftPanel, 'Position', [10, 560, 100, 22], 'Text', 'Top (cm)');
-            app.TopEdit = uieditfield(app.LeftPanel, 'numeric', 'Position', [110, 560, 150, 22], 'Value', 0);
-            app.TopEdit.ValueChangedFcn = @(~,~) app.updateGuidelines(); 
+            uilabel(app.LeftPanel, 'Position', [10, 550, 60, 22], 'Text', 'Top (cm)');
+            app.TopEdit = uieditfield(app.LeftPanel, 'numeric', 'Position', [70, 550, 60, 22], 'Value', 0);
+            app.TopEdit.ValueChangedFcn = @(src, event) app.updateGuidelines(); % ★追加
             
-            uilabel(app.LeftPanel, 'Position', [10, 530, 100, 22], 'Text', 'Bottom (cm)');
-            app.BottomEdit = uieditfield(app.LeftPanel, 'numeric', 'Position', [110, 530, 150, 22], 'Value', 100);
-            app.BottomEdit.ValueChangedFcn = @(~,~) app.updateGuidelines(); 
+            uilabel(app.LeftPanel, 'Position', [140, 550, 50, 22], 'Text', 'Bottom');
+            app.BottomEdit = uieditfield(app.LeftPanel, 'numeric', 'Position', [190, 550, 70, 22], 'Value', 100);
+            app.BottomEdit.ValueChangedFcn = @(src, event) app.updateGuidelines(); % ★追加
             
-            uilabel(app.LeftPanel, 'Position', [10, 500, 100, 22], 'Text', 'Target dpcm');
-            app.DpcmEdit = uieditfield(app.LeftPanel, 'numeric', 'Position', [110, 500, 150, 22], 'Value', 50);
+            uilabel(app.LeftPanel, 'Position', [10, 520, 40, 22], 'Text', 'dpcm');
+            app.DpcmEdit = uieditfield(app.LeftPanel, 'numeric', 'Position', [50, 520, 60, 22], 'Value', 150);
+            app.DpcmEdit.ValueChangedFcn = @(src, event) app.updateGuidelines(); % ★追加
             
-            % ★追加: 補助線の文字位置を選択するドロップダウン
-            uilabel(app.LeftPanel, 'Position', [10, 470, 100, 22], 'Text', '補助線文字位置');
-            app.LabelPosDropDown = uidropdown(app.LeftPanel, 'Position', [110, 470, 150, 22], ...
+            uilabel(app.LeftPanel, 'Position', [120, 520, 70, 22], 'Text', 'ラベル位置');
+            app.LabelPosDropDown = uidropdown(app.LeftPanel, 'Position', [190, 520, 70, 22], ...
                 'Items', {'左', '中央', '右'}, 'Value', '中央');
-            app.LabelPosDropDown.ValueChangedFcn = @(~,~) app.updateGuidelines();
+            app.LabelPosDropDown.ValueChangedFcn = @(src, event) app.updateGuidelines();
             
-            %% 補正点テーブル
-            uilabel(app.LeftPanel, 'Position', [10, 440, 250, 22], 'Text', '補正点リスト (cm列を編集してください)');
-            app.UITable = uitable(app.LeftPanel, 'Position', [10, 230, 250, 200], ...
-                'ColumnName', {'Y座標 (px)', '長さ (cm)'}, 'ColumnEditable', [false, true], ...
-                'Data', zeros(0,2), 'CellEditCallback', @app.TableEdited);
+            uilabel(app.LeftPanel, 'Position', [10, 480, 250, 22], 'Text', '3. マーカー設定 (画像クリックで追加)');
+            app.UITable = uitable(app.LeftPanel, 'Position', [10, 320, 250, 150], ...
+                'ColumnName', {'Y px', 'Length cm'}, 'ColumnEditable', [true, true], 'Data', zeros(0,2));
+            app.UITable.CellEditCallback = @(src, event) app.TableEdited(src, event);
+            
+            app.ClearBtn = uibutton(app.LeftPanel, 'push', 'Position', [10, 280, 250, 30], ...
+                'Text', 'テーブルをクリア', 'ButtonPushedFcn', @app.ClearBtnPushed);
                 
-            app.ClearBtn = uibutton(app.LeftPanel, 'push', 'Position', [10, 190, 250, 30], ...
-                'Text', 'リストをクリア', 'ButtonPushedFcn', @app.ClearBtnPushed);
+            app.GraphCheckbox = uicheckbox(app.LeftPanel, 'Position', [10, 230, 250, 22], 'Text', 'グラフを描画する', 'Value', true);
+            app.PreviewCheckbox = uicheckbox(app.LeftPanel, 'Position', [10, 200, 250, 22], 'Text', 'プレビューを表示する', 'Value', true);
+            
+            app.ProcessBtn = uibutton(app.LeftPanel, 'push', 'Position', [10, 150, 250, 40], ...
+                'Text', '4. 補正処理を実行', 'ButtonPushedFcn', @app.ProcessBtnPushed);
                 
-            %% 出力設定・実行
-            app.GraphCheckbox = uicheckbox(app.LeftPanel, 'Position', [15, 150, 200, 22], ...
-                'Text', '補正関数をグラフで確認', 'Value', true);
-            app.PreviewCheckbox = uicheckbox(app.LeftPanel, 'Position', [15, 120, 200, 22], ...
-                'Text', '補正後にプレビュー表示', 'Value', true);
+            app.SaveBtn = uibutton(app.LeftPanel, 'push', 'Position', [10, 90, 250, 40], ...
+                'Text', '5. 結果を保存', 'ButtonPushedFcn', @app.SaveBtnPushed);
+                
+            app.ScrollPanel = uipanel(app.UIFigure, 'Position', [300, 10, 1040, 860], 'Scrollable', 'on', 'AutoResizeChildren', 'off');
+            app.UIAxes = uiaxes(app.ScrollPanel, 'Position', [10, 10, 500, 800], 'YDir', 'reverse', 'XTick', [], 'YTick', []);
+            app.UIAxes.Toolbar.Visible = 'off';
+            app.UIAxes.Interactions = [];
             
-            app.ProcessBtn = uibutton(app.LeftPanel, 'push', 'Position', [10, 60, 250, 40], ...
-                'Text', '3. 補正実行', 'ButtonPushedFcn', @app.ProcessBtnPushed);
-            app.SaveBtn = uibutton(app.LeftPanel, 'push', 'Position', [10, 10, 250, 40], ...
-                'Text', '4. 保存する', 'ButtonPushedFcn', @app.SaveBtnPushed);
+            app.RefUIAxes = uiaxes(app.ScrollPanel, 'Position', [520, 10, 500, 800], 'YDir', 'reverse', 'XTick', [], 'YTick', []);
+            app.RefUIAxes.Toolbar.Visible = 'off';
+            app.RefUIAxes.Interactions = [];
             
-            %% 右側パネル
-            app.ScrollPanel = uipanel(app.UIFigure, 'Position', [300, 10, 1030, 860], 'Scrollable', 'on');
-            
-            app.UIAxes = uiaxes(app.ScrollPanel);
-            app.UIAxes.XTick = []; app.UIAxes.YTick = [];
-            app.UIAxes.XColor = 'none'; app.UIAxes.YColor = 'none';
-            app.UIAxes.Interactions = []; 
-            
-            app.RefUIAxes = uiaxes(app.ScrollPanel);
-            app.RefUIAxes.XTick = []; app.RefUIAxes.YTick = [];
-            app.RefUIAxes.XColor = 'none'; app.RefUIAxes.YColor = 'none';
-            app.RefUIAxes.Interactions = []; 
-            
-            app.updateAxesLayout();
+            app.FigureSizeChanged();
         end
     end
+    
     % -------------------------------------------------------------------------
-    % 起動と終了
+    % アプリ初期化と終了
     % -------------------------------------------------------------------------
     methods (Access = public)
-        function app = ImageRectifier()
-            if ispc
-                app.LastPath = fullfile(getenv('USERPROFILE'), 'Desktop');
-            else
-                app.LastPath = fullfile(getenv('HOME'), 'Desktop');
-            end
-            
+        function app = ImageRectifier
             createComponents(app);
+            registerApp(app, app.UIFigure);
+            if nargout == 0
+                clear app
+            end
         end
+        
         function delete(app)
-            delete(app.UIFigure);
+            delete(app.UIFigure)
+            if ~isempty(app.GraphFigure) && isvalid(app.GraphFigure)
+                close(app.GraphFigure);
+            end
         end
     end
 end
