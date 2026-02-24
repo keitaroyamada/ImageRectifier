@@ -1,4 +1,4 @@
-classdef ImageRectifier < matlab.apps.AppBase
+classdef ImageRectifier < matlab.apps.AppBase 
     % -------------------------------------------------------------------------
     % UIコンポーネント
     % -------------------------------------------------------------------------
